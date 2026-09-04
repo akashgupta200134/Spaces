@@ -1,0 +1,487 @@
+generator client {
+  provider = "prisma-client-js" 
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  SPACE_MANAGER
+  ADMIN
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  SUSPENDED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum SeatStatus {
+  AVAILABLE
+  RESERVED
+  OCCUPIED
+  MAINTENANCE
+  BLOCKED
+}
+
+enum PaymentStatus {
+  CREATED
+  SUCCESS
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentPurpose {
+  BOOKING
+  MEMBERSHIP
+  RENEWAL
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  PROCESSED
+  REJECTED
+}
+
+enum WaitlistStatus {
+  WAITING
+  NOTIFIED
+  CONVERTED
+  EXPIRED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum OtpPurpose {
+  LOGIN
+  SIGNUP
+  RESET_PASSWORD
+}
+
+enum DeletionStatus {
+  PENDING
+  COMPLETED
+}
+
+model User {
+  id                  String          @id @default(cuid())
+  name                String?         // Optional for initial OTP onboarding
+  email               String          @unique
+  phone               String?         @unique
+  googleId            String?         @unique // Added for Google OAuth tracking
+  passwordHash        String?
+  role                UserRole        @default(USER)
+  isEmailVerified     Boolean         @default(false)
+  isPhoneVerified     Boolean         @default(false)
+  profileImage        String?
+  acceptedTermsAt     DateTime?
+  acceptedPrivacyAt   DateTime?
+  consentVersion      String?
+  deletionRequestedAt DateTime?
+  deletionStatus      DeletionStatus?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  deletedAt           DateTime?
+  memberships     Membership[]
+  bookings        Booking[]
+  payments        Payment[]
+  reviews         Review[]
+  favorites       Favorite[]
+  checkIns        CheckIn[]
+  notifications   Notification[]
+  studySessions   StudySession[]
+  waitlistEntries Waitlist[]
+  supportTickets  SupportTicket[]
+  managedSpaces   SpaceManager[]
+}
+
+model OtpVerification {
+  id         String     @id @default(cuid())
+  email      String?    // Added for Resend Email OTPs
+  phone      String?    // Made optional
+  otpHash    String
+  purpose    OtpPurpose
+  attempts   Int        @default(0)
+  verifiedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime   @default(now())
+
+  @@index([email, purpose])
+  @@index([phone, purpose])
+}
+
+
+
+model Location {
+  id       String  @id @default(cuid())
+  city     String
+  state    String
+  isActive Boolean @default(true)
+  spaces   Space[]
+}
+
+model Space {
+  id             String   @id @default(cuid())
+  locationId     String
+  location       Location @relation(fields: [locationId], references: [id])
+  name           String
+  description    String?
+  address        String
+  pincode        String
+  latitude       Float
+  longitude      Float
+  phone          String?
+  email          String?
+  openingTime    String
+  closingTime    String
+  weeklySchedule Json?
+  capacity       Int
+  status         String   @default("ACTIVE")
+  images         String[]
+  ratingAvg      Float    @default(0)
+  reviewCount    Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  zones                Zone[]
+  facilities           SpaceFacility[]
+  membershipPlans      MembershipPlan[]
+  memberships          Membership[]
+  bookings             Booking[]
+  reviews              Review[]
+  managers             SpaceManager[]
+  checkIns             CheckIn[]
+  cancellationPolicies CancellationPolicy[]
+  waitlistEntries      Waitlist[]
+  favorites            Favorite[]
+
+  @@index([locationId])
+  @@index([latitude, longitude])
+}
+
+model SpaceManager {
+  id      String @id @default(cuid())
+  userId  String
+  spaceId String
+  user    User   @relation(fields: [userId], references: [id])
+  space   Space  @relation(fields: [spaceId], references: [id])
+
+  @@unique([userId, spaceId])
+}
+
+model Zone {
+  id      String @id @default(cuid())
+  spaceId String
+  space   Space  @relation(fields: [spaceId], references: [id])
+  name    String
+  type    String
+  seats   Seat[]
+}
+
+model Seat {
+  id       String     @id @default(cuid())
+  zoneId   String
+  zone     Zone       @relation(fields: [zoneId], references: [id])
+  code     String
+  status   SeatStatus @default(AVAILABLE)
+  bookings Booking[]
+
+  @@unique([zoneId, code])
+}
+
+model Facility {
+  id     String          @id @default(cuid())
+  name   String          @unique
+  icon   String?
+  spaces SpaceFacility[]
+}
+
+model SpaceFacility {
+  spaceId    String
+  facilityId String
+  space      Space    @relation(fields: [spaceId], references: [id])
+  facility   Facility @relation(fields: [facilityId], references: [id])
+
+  @@id([spaceId, facilityId])
+}
+
+model MembershipPlan {
+  id           String       @id @default(cuid())
+  spaceId      String
+  space        Space        @relation(fields: [spaceId], references: [id])
+  name         String
+  description  String?
+  price        Decimal
+  tax          Decimal      @default(0)
+  durationDays Int
+  maxUsage     Int?
+  accessHours  Json?
+  isActive     Boolean      @default(true)
+  memberships  Membership[]
+}
+
+model Membership {
+  id            String                   @id @default(cuid())
+  userId        String
+  user          User                     @relation(fields: [userId], references: [id])
+  spaceId       String
+  space         Space                    @relation(fields: [spaceId], references: [id])
+  planId        String
+  plan          MembershipPlan           @relation(fields: [planId], references: [id])
+  startDate     DateTime
+  endDate       DateTime
+  status        MembershipStatus         @default(ACTIVE)
+  autoRenew     Boolean                  @default(false)
+  memberCode    String                   @unique
+  qrToken       String                   @unique
+  payments      Payment[]
+  autoRenewLogs MembershipAutoRenewLog[]
+  checkIns      CheckIn[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model MembershipAutoRenewLog {
+  id            String     @id @default(cuid())
+  membershipId  String
+  membership    Membership @relation(fields: [membershipId], references: [id])
+  attemptedAt   DateTime   @default(now())
+  status        String
+  paymentId     String?
+  failureReason String?
+}
+
+model Booking {
+  id                 String                 @id @default(cuid())
+  userId             String
+  user               User                   @relation(fields: [userId], references: [id])
+  spaceId            String
+  space              Space                  @relation(fields: [spaceId], references: [id])
+  seatId             String?
+  seat               Seat?                  @relation(fields: [seatId], references: [id])
+  date               DateTime
+  startTime          DateTime
+  endTime            DateTime
+  status             BookingStatus          @default(PENDING)
+  qrToken            String?                @unique
+  cancelledAt        DateTime?
+  cancellationReason String?
+  rescheduledFromId  String?
+  payments           Payment[]
+  rescheduleLogs     BookingRescheduleLog[]
+  checkIns           CheckIn[]
+
+  @@index([userId])
+  @@index([spaceId])
+  @@index([date])
+  @@index([seatId, date, startTime, endTime])
+}
+
+model BookingRescheduleLog {
+  id            String   @id @default(cuid())
+  bookingId     String
+  booking       Booking  @relation(fields: [bookingId], references: [id])
+  oldDate       DateTime
+  oldStartTime  DateTime
+  oldEndTime    DateTime
+  newDate       DateTime
+  newStartTime  DateTime
+  newEndTime    DateTime
+  rescheduledAt DateTime @default(now())
+}
+
+model CancellationPolicy {
+  id               String  @id @default(cuid())
+  spaceId          String?
+  space            Space?  @relation(fields: [spaceId], references: [id])
+  appliesTo        String
+  hoursBeforeStart Int
+  refundPercentage Int
+}
+
+model Payment {
+  id                String         @id @default(cuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+  orderId           String         @unique
+  transactionId     String?        @unique
+  amount            Decimal
+  tax               Decimal        @default(0)
+  currency          String         @default("INR")
+  method            String?
+  status            PaymentStatus  @default(CREATED)
+  purpose           PaymentPurpose
+  bookingId         String?
+  booking           Booking?       @relation(fields: [bookingId], references: [id])
+  membershipId      String?
+  membership        Membership?    @relation(fields: [membershipId], references: [id])
+  rawGatewayPayload Json?
+  refunds           Refund[]
+  createdAt         DateTime       @default(now())
+
+  @@index([transactionId])
+  @@index([userId])
+}
+
+model Refund {
+  id              String       @id @default(cuid())
+  paymentId       String
+  payment         Payment      @relation(fields: [paymentId], references: [id])
+  amount          Decimal
+  reason          String?
+  status          RefundStatus @default(REQUESTED)
+  requestedBy     String
+  processedAt     DateTime?
+  gatewayRefundId String?
+  createdAt       DateTime     @default(now())
+}
+
+model CheckIn {
+  id                   String      @id @default(cuid())
+  userId               String
+  user                 User        @relation(fields: [userId], references: [id])
+  spaceId              String
+  space                Space       @relation(fields: [spaceId], references: [id])
+  membershipId         String?
+  membership           Membership? @relation(fields: [membershipId], references: [id])
+  bookingId            String?
+  booking              Booking?    @relation(fields: [bookingId], references: [id])
+  zone                 String?
+  checkInTime          DateTime    @default(now())
+  checkOutTime         DateTime?
+  expectedCheckOutTime DateTime?
+  isOverstay           Boolean     @default(false)
+  isNoShow             Boolean     @default(false)
+  deviceInfo           Json?
+}
+
+model Review {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id])
+  spaceId           String
+  space             Space    @relation(fields: [spaceId], references: [id])
+  overallRating     Int
+  environmentRating Int?
+  cleanlinessRating Int?
+  wifiRating        Int?
+  comfortRating     Int?
+  staffRating       Int?
+  valueRating       Int?
+  comment           String?
+  isHidden          Boolean  @default(false)
+  createdAt         DateTime @default(now())
+}
+
+model Favorite {
+  userId  String
+  spaceId String
+  user    User   @relation(fields: [userId], references: [id])
+  space   Space  @relation(fields: [spaceId], references: [id])
+
+  @@id([userId, spaceId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String
+  title     String
+  body      String
+  isRead    Boolean  @default(false)
+  metadata  Json?
+  createdAt DateTime @default(now())
+}
+
+model Offer {
+  id         String   @id @default(cuid())
+  code       String   @unique
+  type       String
+  value      Decimal
+  validFrom  DateTime
+  validTo    DateTime
+  usageLimit Int?
+  usedCount  Int      @default(0)
+}
+
+model Waitlist {
+  id            String         @id @default(cuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id])
+  spaceId       String
+  space         Space          @relation(fields: [spaceId], references: [id])
+  planId        String?
+  zoneId        String?
+  preferredDate DateTime?
+  status        WaitlistStatus @default(WAITING)
+  notifiedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([spaceId, status])
+}
+
+model SupportTicket {
+  id          String           @id @default(cuid())
+  userId      String
+  user        User             @relation(fields: [userId], references: [id])
+  subject     String
+  category    String
+  description String
+  status      TicketStatus     @default(OPEN)
+  priority    String           @default("NORMAL")
+  assignedTo  String?
+  messages    SupportMessage[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model SupportMessage {
+  id          String        @id @default(cuid())
+  ticketId    String
+  ticket      SupportTicket @relation(fields: [ticketId], references: [id])
+  senderId    String
+  message     String
+  attachments String[]
+  createdAt   DateTime      @default(now())
+}
+
+model StudySession {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id])
+  spaceId         String?
+  startTime       DateTime
+  endTime         DateTime?
+  durationSeconds Int?
+  type            String
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+}
