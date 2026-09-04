@@ -154,22 +154,34 @@ router.get('/spaces', async (req: Request, res: Response) => {
   }
 });
 
+
 router.get('/spaces/all', async (req: Request, res: Response) => {
   try {
     const spaces = await prisma.space.findMany({
       include: {
         location: true,
-        managers: {
-          include: { user: { select: { id: true, name: true, email: true } } },
+        facilities: {
+          include: {
+            facility: true,
+          },
         },
       },
-      orderBy: { createdAt: 'desc' },
     });
-    res.json(spaces);
-  } catch (error: any) {
-    res.status(500).json({ message: 'Failed to fetch spaces', error: error.message });
+
+    // Transform facilities relations into flat string array expected by UI
+    const formattedSpaces = spaces.map((space) => ({
+      ...space,
+      amenities: space.facilities?.map((f) => f.facility.name) || [],
+    }));
+
+    return res.json(formattedSpaces);
+  } catch (error) {
+    console.error('Failed to fetch spaces:', error);
+    return res.status(500).json({ message: 'Failed to fetch spaces' });
   }
 });
+
+
 
 router.post('/spaces', async (req: Request, res: Response) => {
   const {
@@ -234,6 +246,8 @@ router.post('/spaces', async (req: Request, res: Response) => {
     res.status(500).json({ message: 'Failed to create space record.', error: error.message });
   }
 });
+
+
 
 // ==========================================
 // 3. SPACE MANAGER CRUD & USER ACTIONS
@@ -497,6 +511,151 @@ router.delete('/space-managers/:userId', async (req: Request<{ userId: string }>
     res.json({ message: 'Space Manager deleted successfully.' });
   } catch (error: any) {
     res.status(500).json({ message: 'Failed to delete manager account', error: error.message });
+  }
+});
+
+
+
+// PUT /admin/spaces/:id - Update space details
+
+router.put('/spaces/:id', async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const {
+      locationId,
+      name,
+      description,
+      address,
+      pincode,
+      latitude,
+      longitude,
+      phone,
+      email,
+      openingTime,
+      closingTime,
+      capacity,
+      status,
+      images,
+      amenities, // Expected array of strings, e.g. ["Wi-Fi", "Air Conditioning"]
+    } = req.body;
+
+    const updateData: Record<string, any> = {};
+
+    if (name !== undefined) updateData.name = name;
+    if (description !== undefined) updateData.description = description;
+    if (address !== undefined) updateData.address = address;
+    if (pincode !== undefined) updateData.pincode = pincode;
+    if (phone !== undefined) updateData.phone = phone;
+    if (email !== undefined) updateData.email = email;
+    if (openingTime !== undefined) updateData.openingTime = openingTime;
+    if (closingTime !== undefined) updateData.closingTime = closingTime;
+    if (capacity !== undefined) updateData.capacity = Number(capacity);
+    if (status !== undefined) updateData.status = status;
+    if (images !== undefined) updateData.images = images;
+
+    if (latitude !== undefined && latitude !== null && latitude !== '') {
+      updateData.latitude = Number(latitude);
+    }
+    if (longitude !== undefined && longitude !== null && longitude !== '') {
+      updateData.longitude = Number(longitude);
+    }
+    if (locationId) {
+      updateData.location = { connect: { id: locationId } };
+    }
+
+    // 1. Update space scalar fields
+    await prisma.space.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // 2. Sync facilities if amenities array is sent
+    if (Array.isArray(amenities)) {
+      // Remove old space-facility relationships
+      await prisma.spaceFacility.deleteMany({
+        where: { spaceId: id },
+      });
+
+      if (amenities.length > 0) {
+        // Upsert facilities to guarantee they exist in parallel
+        const facilityRecords = await Promise.all(
+          amenities.map((facilityName: string) =>
+            prisma.facility.upsert({
+              where: { name: facilityName },
+              update: {},
+              create: { name: facilityName },
+            })
+          )
+        );
+
+        // Bulk-create junction records
+        await prisma.spaceFacility.createMany({
+          data: facilityRecords.map((facility) => ({
+            spaceId: id,
+            facilityId: facility.id,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    // 3. Fetch fresh space with relation details
+    const updatedSpace = await prisma.space.findUnique({
+      where: { id },
+      include: {
+        location: true,
+        facilities: {
+          include: {
+            facility: true,
+          },
+        },
+      },
+    });
+
+    const formatted = {
+      ...updatedSpace,
+      amenities: updatedSpace?.facilities.map((f) => f.facility.name) || [],
+    };
+
+    return res.json(formatted);
+  } catch (error) {
+    console.error('Failed to update space:', error);
+    return res.status(500).json({ message: 'Failed to update space details' });
+  }
+});
+
+
+// PATCH /admin/spaces/:id/status - Quick status change (ACTIVE, MAINTENANCE, INACTIVE)
+router.patch('/spaces/:id/status', async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { status } = req.body;
+
+    const updatedSpace = await prisma.space.update({
+      where: { id },
+      data: { status },
+    });
+
+    return res.json(updatedSpace);
+  } catch (error) {
+    console.error('Failed to update status:', error);
+    return res.status(500).json({ message: 'Failed to update status' });
+  }
+});
+
+// DELETE /admin/spaces/:id - Delete space
+router.delete('/spaces/:id', async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+
+    await prisma.space.delete({
+      where: { id },
+    });
+
+    return res.json({ message: 'Space deleted successfully' });
+  } catch (error) {
+    console.error('Failed to delete space:', error);
+    return res.status(500).json({ message: 'Failed to delete space' });
   }
 });
 
