@@ -4,13 +4,12 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { OtpPurpose, UserRole } from '@prisma/client';
 import prisma from '../lib/prisma';
-import resend from '../lib/resend';
 import { JwtPayload } from '../types/express';
 import { sendOtpEmail } from '../lib/email';
 
 const router = Router();
 
-// --- 1. Signup (Email, Password, Name, Phone, Terms Consent) ---
+// --- 1. Public Signup (Members / Users Only) ---
 router.post('/signup', async (req: Request, res: Response): Promise<void> => {
   const { firstName, lastName, email, password, phone, acceptTerms } = req.body;
 
@@ -48,21 +47,19 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
       },
     });
 
-    // Generate Verification OTP
     const rawOtp = crypto.randomInt(100000, 999999).toString();
     const otpHash = await bcrypt.hash(rawOtp, 10);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await prisma.otpVerification.deleteMany({ where: { email, purpose: OtpPurpose.SIGNUP } });
     await prisma.otpVerification.create({
       data: { email, otpHash, purpose: OtpPurpose.SIGNUP, expiresAt },
     });
 
-
-          if (process.env.NODE_ENV !== 'production') {
-          console.log(`🔑 [DEV VERIFY OTP] Code for ${email}: ${rawOtp}`);
-}
-  await sendOtpEmail(email, rawOtp);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`🔑 [DEV VERIFY OTP] Code for ${email}: ${rawOtp}`);
+    }
+    await sendOtpEmail(email, rawOtp);
 
     res.status(201).json({
       message: 'Registration successful. Please verify your email with the OTP sent.',
@@ -154,7 +151,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// --- 4. Forgot Password (Request OTP) ---
+// --- 4. Forgot Password ---
 router.post('/forgot-password', async (req: Request, res: Response): Promise<void> => {
   const { email } = req.body;
   if (!email) {
@@ -179,17 +176,17 @@ router.post('/forgot-password', async (req: Request, res: Response): Promise<voi
     });
 
     if (process.env.NODE_ENV !== 'production') {
-  console.log(`🔑 [DEV RESET OTP] Code for ${email}: ${rawOtp}`);
-}
+      console.log(`🔑 [DEV RESET OTP] Code for ${email}: ${rawOtp}`);
+    }
 
-await sendOtpEmail(email, rawOtp);
+    await sendOtpEmail(email, rawOtp);
     res.json({ message: 'If an account exists with that email, a reset code was sent.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- 5. Reset Password (Verify OTP & Change Password) ---
+// --- 5. Reset Password ---
 router.post('/reset-password', async (req: Request, res: Response): Promise<void> => {
   const { email, otp, newPassword } = req.body;
 

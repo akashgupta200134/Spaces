@@ -83,10 +83,10 @@ enum DeletionStatus {
 
 model User {
   id                  String          @id @default(cuid())
-  name                String?         // Optional for initial OTP onboarding
+  name                String?
   email               String          @unique
   phone               String?         @unique
-  googleId            String?         @unique // Added for Google OAuth tracking
+  googleId            String?         @unique
   passwordHash        String?
   role                UserRole        @default(USER)
   isEmailVerified     Boolean         @default(false)
@@ -100,17 +100,18 @@ model User {
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
   deletedAt           DateTime?
-  memberships     Membership[]
-  bookings        Booking[]
-  payments        Payment[]
-  reviews         Review[]
-  favorites       Favorite[]
-  checkIns        CheckIn[]
-  notifications   Notification[]
-  studySessions   StudySession[]
-  waitlistEntries Waitlist[]
-  supportTickets  SupportTicket[]
-  managedSpaces   SpaceManager[]
+  memberships         Membership[]
+  bookings            Booking[]
+  payments            Payment[]
+  reviews             Review[]
+  favorites           Favorite[]
+  notifications       Notification[]
+  studySessions       StudySession[]
+  waitlistEntries     Waitlist[]
+  supportTickets      SupportTicket[]
+  spaceManager        SpaceManager?
+  checkIns            CheckIn[]       @relation("MemberCheckIns")
+  scannedLogs         CheckIn[]       @relation("ManagerCheckIns")
 }
 
 model OtpVerification {
@@ -178,13 +179,11 @@ model Space {
 }
 
 model SpaceManager {
-  id      String @id @default(cuid())
-  userId  String
-  spaceId String
-  user    User   @relation(fields: [userId], references: [id])
-  space   Space  @relation(fields: [spaceId], references: [id])
-
-  @@unique([userId, spaceId])
+  id      String  @id @default(cuid())
+  userId  String  @unique
+  spaceId String?
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space   Space?  @relation(fields: [spaceId], references: [id])
 }
 
 model Zone {
@@ -355,24 +354,6 @@ model Refund {
   createdAt       DateTime     @default(now())
 }
 
-model CheckIn {
-  id                   String      @id @default(cuid())
-  userId               String
-  user                 User        @relation(fields: [userId], references: [id])
-  spaceId              String
-  space                Space       @relation(fields: [spaceId], references: [id])
-  membershipId         String?
-  membership           Membership? @relation(fields: [membershipId], references: [id])
-  bookingId            String?
-  booking              Booking?    @relation(fields: [bookingId], references: [id])
-  zone                 String?
-  checkInTime          DateTime    @default(now())
-  checkOutTime         DateTime?
-  expectedCheckOutTime DateTime?
-  isOverstay           Boolean     @default(false)
-  isNoShow             Boolean     @default(false)
-  deviceInfo           Json?
-}
 
 model Review {
   id                String   @id @default(cuid())
@@ -484,4 +465,27 @@ model AuditLog {
   entityId   String
   metadata   Json?
   createdAt  DateTime @default(now())
+}
+
+
+
+model CheckIn {
+  id                   String      @id @default(cuid())
+  userId               String
+  user                 User        @relation("MemberCheckIns", fields: [userId], references: [id])
+  scannedById          String?
+  scannedBy            User?       @relation("ManagerCheckIns", fields: [scannedById], references: [id])
+  spaceId              String
+  space                Space       @relation(fields: [spaceId], references: [id])
+  membershipId         String?
+  membership           Membership? @relation(fields: [membershipId], references: [id])
+  bookingId            String?
+  booking              Booking?    @relation(fields: [bookingId], references: [id])
+  zone                 String?
+  checkInTime          DateTime    @default(now())
+  checkOutTime         DateTime?
+  expectedCheckOutTime DateTime?
+  isOverstay           Boolean     @default(false)
+  isNoShow             Boolean     @default(false)
+  deviceInfo           Json?
 }

@@ -4,7 +4,15 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { LayoutDashboard, Users, Building2, BarChart3, Settings, LogOut } from 'lucide-react';
+import {
+  LayoutDashboard,
+  Users,
+  UserCog,
+  Building2,
+  BarChart3,
+  Settings,
+  LogOut,
+} from 'lucide-react';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
@@ -13,6 +21,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navigation = [
     { name: 'Overview', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Users', href: '/dashboard/users', icon: Users },
+    { name: 'Space Managers', href: '/dashboard/space-managers', icon: UserCog },
     { name: 'Spaces', href: '/dashboard/spaces', icon: Building2 },
     { name: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
     { name: 'Settings', href: '/dashboard/settings', icon: Settings },
@@ -21,7 +30,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex">
       {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4">
+      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4 flex-shrink-0">
         <div>
           <div className="px-3 py-4 text-xl font-bold text-white tracking-wide">
             Spaces <span className="text-indigo-500">Admin</span>
@@ -29,14 +38,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <nav className="mt-6 space-y-1">
             {navigation.map((item) => {
               const Icon = item.icon;
-              const isActive = pathname === item.href;
+              const isActive =
+                item.href === '/dashboard'
+                  ? pathname === '/dashboard'
+                  : pathname.startsWith(item.href);
+
               return (
                 <Link
                   key={item.name}
                   href={item.href}
                   className={`flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${
                     isActive
-                      ? 'bg-indigo-600 text-white'
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
                       : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
                   }`}
                 >
