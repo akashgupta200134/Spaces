@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../lib/prisma';
-
+import { calculateRefundAmount, createCancellationPolicy, deleteCancellationPolicy, getCancellationPolicies } from '../services/adminPolicy.service';
+import { processAdminRefund } from '../services/adminFinance.service';
+import { getFinancialOverview, getTransactionLedger } from '../services/adminLedger.service';
 const router = Router();
 
 
@@ -662,7 +664,6 @@ router.delete('/spaces/:id', async (req: Request, res: Response) => {
 // ==========================================
 // 4. SYSTEM STATISTICS
 // ==========================================
-
 router.get('/stats', async (req: Request, res: Response) => {
   try {
     const [
@@ -674,6 +675,10 @@ router.get('/stats', async (req: Request, res: Response) => {
       verifiedUsers,
       adminCount,
       pendingVerifications,
+      totalMembershipPlans,
+      activeMembershipPlans,
+      activeSubscriptions,
+      totalSubscriptions,
     ] = await Promise.all([
       prisma.space.count(),
       prisma.space.count({ where: { status: 'ACTIVE' } }),
@@ -683,6 +688,14 @@ router.get('/stats', async (req: Request, res: Response) => {
       prisma.user.count({ where: { role: 'USER', isEmailVerified: true } }),
       prisma.user.count({ where: { role: 'ADMIN' } }),
       prisma.user.count({ where: { role: 'USER', isEmailVerified: false } }),
+
+      // Membership Plan Queries
+      prisma.membershipPlan.count(),
+      prisma.membershipPlan.count({ where: { isActive: true } }),
+
+      // User Membership (Subscription) Queries
+      prisma.membership.count({ where: { status: 'ACTIVE' } }),
+      prisma.membership.count(),
     ]);
 
     res.json({
@@ -694,10 +707,622 @@ router.get('/stats', async (req: Request, res: Response) => {
       verifiedUsers,
       adminCount,
       pendingVerifications,
+      totalMembershipPlans,
+      activeMembershipPlans,
+      activeSubscriptions,
+      totalSubscriptions,
     });
   } catch (error: any) {
     console.error('Error fetching admin statistics:', error);
     res.status(500).json({ message: 'Failed to fetch admin statistics', error: error.message });
+  }
+});
+
+
+
+
+// GET /api/admin/analytics
+router.get('/analytics', async (req: Request, res: Response) => {
+  const timeRange = (req.query.timeRange as string) || '30d';
+
+  const daysMap: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90, '1y': 365 };
+  const days = daysMap[timeRange] || 30;
+  const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    // 1. Parallel Core Database Queries
+    const [
+      successfulPayments,
+      refundsAgg,
+      bookings,
+      activeMembershipsCount,
+      checkIns,
+      spaces
+    ] = await Promise.all([
+      // Revenue by Status and Purpose
+      prisma.payment.findMany({
+        where: { createdAt: { gte: startDate }, status: 'SUCCESS' },
+        select: { amount: true, purpose: true, method: true, createdAt: true }
+      }),
+      // Total Refunded Amount
+      prisma.refund.aggregate({
+        where: { createdAt: { gte: startDate }, status: 'PROCESSED' },
+        _sum: { amount: true }
+      }),
+      // Bookings Summary
+      prisma.booking.findMany({
+        where: { date: { gte: startDate } },
+        select: { id: true, status: true, date: true, startTime: true, endTime: true }
+      }),
+      // Active Memberships
+      prisma.membership.count({
+        where: { status: 'ACTIVE' }
+      }),
+      // Check-In Operational Metrics
+      prisma.checkIn.findMany({
+        where: { checkInTime: { gte: startDate } },
+        select: { id: true, isOverstay: true, isNoShow: true, checkOutTime: true }
+      }),
+      // Space Performance Data
+      prisma.space.findMany({
+        include: {
+          location: true,
+          bookings: {
+            where: { date: { gte: startDate }, status: 'CONFIRMED' },
+            include: { payments: { where: { status: 'SUCCESS' } } }
+          }
+        }
+      })
+    ]);
+
+    // 2. Compute Top-Line Metrics
+    const grossRevenue = successfulPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const totalRefunds = Number(refundsAgg._sum.amount || 0);
+    const netRevenue = Math.max(0, grossRevenue - totalRefunds);
+
+    const bookingRevenue = successfulPayments
+      .filter(p => p.purpose === 'BOOKING')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const membershipRevenue = successfulPayments
+      .filter(p => p.purpose === 'MEMBERSHIP' || p.purpose === 'RENEWAL')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const totalBookings = bookings.length;
+    const confirmedBookings = bookings.filter(b => b.status === 'CONFIRMED' || b.status === 'COMPLETED');
+    const cancelledBookings = bookings.filter(b => b.status === 'CANCELLED');
+    const cancellationRate = totalBookings > 0 ? Math.round((cancelledBookings.length / totalBookings) * 100) : 0;
+
+    // Operational Health Calculations
+    const totalCheckIns = checkIns.length;
+    const overstayCount = checkIns.filter(c => c.isOverstay).length;
+    const noShowCount = checkIns.filter(c => c.isNoShow).length;
+    const overstayRate = totalCheckIns > 0 ? Math.round((overstayCount / totalCheckIns) * 100) : 0;
+
+    // Reserved Hours calculation
+    const totalReservedHours = confirmedBookings.reduce((sum, b) => {
+      const diffMs = new Date(b.endTime).getTime() - new Date(b.startTime).getTime();
+      const hours = diffMs / (1000 * 60 * 60);
+      return sum + (hours > 0 ? hours : 2); // Default to 2 hours if standard slot
+    }, 0);
+
+    // 3. Time-Series Chart Aggregation (Dynamic Date Buckets)
+    const chartBucketCount = days <= 7 ? 7 : days <= 30 ? 10 : 12;
+    const intervalMs = (days * 24 * 60 * 60 * 1000) / chartBucketCount;
+    
+    const timeSeries = Array.from({ length: chartBucketCount }).map((_, idx) => {
+      const bucketStart = new Date(startDate.getTime() + idx * intervalMs);
+      const bucketEnd = new Date(startDate.getTime() + (idx + 1) * intervalMs);
+
+      const bucketRevenue = successfulPayments
+        .filter(p => p.createdAt >= bucketStart && p.createdAt < bucketEnd)
+        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+      const bucketBookingCount = bookings.filter(
+        b => b.date >= bucketStart && b.date < bucketEnd && b.status === 'CONFIRMED'
+      ).length;
+
+      const dateLabel = bucketStart.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric'
+      });
+
+      return { label: dateLabel, revenue: bucketRevenue, bookings: bucketBookingCount };
+    });
+
+    // 4. Workspace Ranking & Occupancy Breakdown
+    const topSpaces = spaces
+      .map(space => {
+        const spaceRevenue = space.bookings.reduce((sum, b) => {
+          return sum + b.payments.reduce((pSum, p) => pSum + Number(p.amount || 0), 0);
+        }, 0);
+
+        const occupancyRate = space.capacity > 0
+          ? Math.min(Math.round((space.bookings.length / (space.capacity * days)) * 100), 100)
+          : 0;
+
+        return {
+          id: space.id,
+          name: space.name,
+          location: space.location ? `${space.location.city}, ${space.location.state}` : 'Unassigned',
+          revenue: spaceRevenue,
+          occupancy: occupancyRate,
+          bookingsCount: space.bookings.length,
+          rating: space.ratingAvg || 4.5,
+          reviewCount: space.reviewCount || 0
+        };
+      })
+      .sort((a, b) => b.revenue - a.revenue);
+
+    const overallOccupancy = topSpaces.length > 0
+      ? Math.round(topSpaces.reduce((acc, s) => acc + s.occupancy, 0) / topSpaces.length)
+      : 0;
+
+    return res.json({
+      summary: {
+        grossRevenue,
+        netRevenue,
+        totalRefunds,
+        totalBookings,
+        confirmedBookingsCount: confirmedBookings.length,
+        cancellationRate,
+        activeMemberships: activeMembershipsCount,
+        reservedHours: Math.round(totalReservedHours),
+        overallOccupancy,
+        totalCheckIns,
+        overstayRate,
+        noShowCount
+      },
+      revenueBreakdown: {
+        bookingRevenue,
+        membershipRevenue
+      },
+      timeSeries,
+      topSpaces
+    });
+  } catch (error) {
+    console.error('Advanced Analytics Error:', error);
+    return res.status(500).json({ error: 'Failed to compute analytics data' });
+  }
+});
+
+
+
+// ==========================================
+// MEMBERSHIP PLAN MANAGEMENT
+// ==========================================
+
+// GET /admin/membership-plans - List all plans (Optional filter ?spaceId=xxx)
+router.get('/membership-plans', async (req: Request, res: Response) => {
+  try {
+    const rawSpaceId = req.query.spaceId;
+    
+    // Construct 'where' dynamically to satisfy exactOptionalPropertyTypes
+    const where = typeof rawSpaceId === 'string' && rawSpaceId.trim() !== ''
+      ? { spaceId: rawSpaceId }
+      : {};
+
+    const plans = await prisma.membershipPlan.findMany({
+      where,
+      include: {
+        space: {
+          select: {
+            id: true,
+            name: true,
+            location: {
+              select: { city: true, state: true },
+            },
+          },
+        },
+      },
+      orderBy: { price: 'asc' },
+    });
+
+    return res.json(plans);
+  } catch (error: any) {
+    console.error('Failed to fetch membership plans:', error);
+    return res.status(500).json({ message: 'Failed to fetch membership plans', error: error.message });
+  }
+});
+
+// POST /admin/membership-plans - Create a new membership plan
+// POST /admin/membership-plans - Create a new membership plan
+
+// POST /admin/membership-plans - Create a new membership plan
+// POST /admin/membership-plans - Create a new membership plan
+router.post('/membership-plans', async (req: Request, res: Response) => {
+  const {
+    spaceId,
+    name,
+    description,
+    price,
+    tax,
+    durationDays,
+    maxUsage,
+    accessHours,
+    isActive,
+  } = req.body;
+
+  if (!name || typeof name !== 'string' || price === undefined || !durationDays) {
+    return res.status(400).json({
+      message: 'Missing required fields: name, price, and durationDays are required.',
+    });
+  }
+
+  try {
+    if (spaceId) {
+      const spaceExists = await prisma.space.findUnique({ where: { id: spaceId } });
+      if (!spaceExists) {
+        return res.status(404).json({ message: 'Target space does not exist.' });
+      }
+    }
+
+    const plan = await prisma.membershipPlan.create({
+      data: {
+        name,
+        price: parseFloat(price),
+        durationDays: parseInt(durationDays, 10),
+        tax: tax !== undefined ? parseFloat(tax) : 0,
+        isActive: isActive !== undefined ? Boolean(isActive) : true,
+        spaceId: spaceId || undefined,
+        description: description || undefined,
+        maxUsage: maxUsage !== undefined && maxUsage !== null && maxUsage !== '' ? parseInt(maxUsage, 10) : undefined,
+        accessHours: accessHours || undefined,
+      },
+      include: {
+        space: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    return res.status(201).json(plan);
+  } catch (error: any) {
+    console.error('Error creating membership plan:', error);
+    return res.status(500).json({ message: 'Failed to create membership plan.', error: error.message });
+  }
+});
+
+// PUT /admin/membership-plans/:id - Update an existing plan
+router.put('/membership-plans/:id', async (req: Request<{ id: string }>, res: Response) => {
+  const { id } = req.params;
+
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({ message: 'Valid Plan ID parameter is required.' });
+  }
+
+  const {
+    spaceId,
+    name,
+    description,
+    price,
+    tax,
+    durationDays,
+    maxUsage,
+    accessHours,
+    isActive,
+  } = req.body;
+
+  try {
+    const updateData: Record<string, any> = {};
+
+    if (typeof spaceId === 'string') updateData.spaceId = spaceId;
+    if (typeof name === 'string') updateData.name = name;
+    if (description !== undefined) updateData.description = description;
+    if (price !== undefined) updateData.price = parseFloat(price);
+    if (tax !== undefined) updateData.tax = parseFloat(tax);
+    if (durationDays !== undefined) updateData.durationDays = parseInt(durationDays, 10);
+    if (maxUsage !== undefined) updateData.maxUsage = maxUsage === null ? null : parseInt(maxUsage, 10);
+    if (accessHours !== undefined) updateData.accessHours = accessHours;
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+
+    const updatedPlan = await prisma.membershipPlan.update({
+      where: { id },
+      data: updateData,
+      include: {
+        space: { select: { id: true, name: true } },
+      },
+    });
+
+    return res.json(updatedPlan);
+  } catch (error: any) {
+    console.error('Failed to update membership plan:', error);
+    return res.status(500).json({ message: 'Failed to update membership plan', error: error.message });
+  }
+});
+
+// PATCH /admin/membership-plans/:id/status - Toggle active status
+router.patch('/membership-plans/:id/status', async (req: Request<{ id: string }>, res: Response) => {
+  const { id } = req.params;
+  const { isActive } = req.body;
+
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({ message: 'Valid Plan ID parameter is required.' });
+  }
+
+  if (typeof isActive !== 'boolean') {
+    return res.status(400).json({ message: 'isActive boolean status is required.' });
+  }
+
+  try {
+    const updatedPlan = await prisma.membershipPlan.update({
+      where: { id },
+      data: { isActive },
+    });
+
+    return res.json(updatedPlan);
+  } catch (error: any) {
+    console.error('Failed to update plan status:', error);
+    return res.status(500).json({ message: 'Failed to update plan status', error: error.message });
+  }
+});
+
+// DELETE /admin/membership-plans/:id - Delete a plan
+router.delete('/membership-plans/:id', async (req: Request<{ id: string }>, res: Response) => {
+  const { id } = req.params;
+
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({ message: 'Valid Plan ID parameter is required.' });
+  }
+
+  try {
+    await prisma.membershipPlan.delete({
+      where: { id },
+    });
+
+    return res.json({ message: 'Membership plan deleted successfully.' });
+  } catch (error: any) {
+    console.error('Failed to delete membership plan:', error);
+    return res.status(500).json({ message: 'Failed to delete membership plan', error: error.message });
+  }
+});
+
+
+// ==========================================
+// FACILITY MANAGEMENT
+// ==========================================
+// GET /facilities - Fetch all facilities matching your schema
+router.get('/facilities', async (req: Request, res: Response) => {
+  try {
+    const facilities = await prisma.facility.findMany({
+      select: {
+        id: true,
+        name: true,
+        icon: true,
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
+
+    return res.json(facilities);
+  } catch (error: any) {
+    console.error('Error fetching facilities:', error);
+    return res.status(500).json({
+      message: 'Failed to fetch facilities from the database.',
+      error: error.message,
+    });
+  }
+});
+
+
+
+/**
+ * GET /admin/finance/overview
+ * Fetch high-level platform revenue, tax, and refund metrics
+ */
+router.get('/finance/overview', async (req: Request, res: Response) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = startDate ? new Date(startDate as string) : undefined;
+    const end = endDate ? new Date(endDate as string) : undefined;
+
+    const metrics = await getFinancialOverview(start, end);
+    res.json(metrics);
+  } catch (error: any) {
+    console.error('Error fetching financial overview:', error);
+    res.status(500).json({ message: 'Failed to fetch financial metrics', error: error.message });
+  }
+});
+
+/**
+ * GET /admin/finance/ledger
+ * Paginated list of transactions with status and purpose filtering
+ */
+router.get('/finance/ledger', async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const status = req.query.status as any;
+    const purpose = req.query.purpose as any;
+
+    const ledger = await getTransactionLedger({ page, limit, status, purpose });
+    res.json(ledger);
+  } catch (error: any) {
+    console.error('Error fetching ledger:', error);
+    res.status(500).json({ message: 'Failed to fetch transaction ledger', error: error.message });
+  }
+});
+
+// ==========================================
+// 2. REFUND PROCESSING ENDPOINTS
+// ==========================================
+
+/**
+ * POST /admin/finance/refunds/process
+ * Approve or Reject a user-requested refund
+ */
+router.post('/finance/refunds/process', async (req: Request, res: Response) => {
+  try {
+    const { refundId, action, rejectionReason, gatewayRefundId } = req.body;
+    // Assuming authenticated admin ID is attached to req.user by auth middleware
+    const adminUserId = (req as any).user?.id || 'admin-system-id';
+
+    if (!refundId || !['APPROVE', 'REJECT'].includes(action)) {
+      return res.status(400).json({ message: 'Invalid payload. refundId and valid action are required.' });
+    }
+
+    const result = await processAdminRefund({
+      refundId,
+      adminUserId,
+      action,
+      rejectionReason,
+      gatewayRefundId,
+    });
+
+    res.json({ message: `Refund successfully ${action.toLowerCase()}d`, data: result });
+  } catch (error: any) {
+    console.error('Error processing refund:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+/**
+ * GET /admin/finance/bookings/:bookingId/refund-preview
+ * Calculate expected refund amount based on active cancellation policies
+ */
+router.get('/finance/bookings/:bookingId/refund-preview', async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+
+    if (typeof bookingId !== 'string' || !bookingId) {
+      return res.status(400).json({ message: 'Invalid or missing booking ID' });
+    }
+
+    const preview = await calculateRefundAmount(bookingId);
+    res.json(preview);
+  } catch (error: any) {
+    console.error('Error calculating refund preview:', error);
+    res.status(500).json({ message: 'Failed to calculate refund preview', error: error.message });
+  }
+});
+
+// ==========================================
+// 3. CANCELLATION POLICY MANAGEMENT
+// ==========================================
+
+/**
+ * POST /admin/finance/policies
+ * Create a global or space-specific cancellation policy
+ */
+router.post('/finance/policies', async (req: Request, res: Response) => {
+  try {
+    const { spaceId, appliesTo, hoursBeforeStart, refundPercentage } = req.body;
+
+    if (!appliesTo || hoursBeforeStart === undefined || refundPercentage === undefined) {
+      return res.status(400).json({ message: 'Missing required policy fields.' });
+    }
+
+    const policy = await createCancellationPolicy({
+      spaceId,
+      appliesTo,
+      hoursBeforeStart: Number(hoursBeforeStart),
+      refundPercentage: Number(refundPercentage),
+    });
+
+    res.status(201).json({ message: 'Cancellation policy created', data: policy });
+  } catch (error: any) {
+    console.error('Error creating policy:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+
+// GET all cancellation policies
+router.get('/finance/policies', async (req: Request, res: Response) => {
+  try {
+    const policies = await getCancellationPolicies();
+    res.json({ data: policies });
+  } catch (error: any) {
+    console.error('Error fetching policies:', error);
+    res.status(500).json({ message: 'Failed to fetch cancellation policies', error: error.message });
+  }
+});
+
+// POST /admin/finance/policies (Create policy)
+router.post('/finance/policies', async (req: Request, res: Response) => {
+  try {
+    const { spaceId, appliesTo, hoursBeforeStart, refundPercentage } = req.body;
+
+    if (!appliesTo || hoursBeforeStart === undefined || refundPercentage === undefined) {
+      return res.status(400).json({ message: 'Missing required policy fields.' });
+    }
+
+    const policy = await createCancellationPolicy({
+      spaceId,
+      appliesTo,
+      hoursBeforeStart,
+      refundPercentage,
+    });
+
+    res.status(201).json({ message: 'Cancellation policy created', data: policy });
+  } catch (error: any) {
+    console.error('Error creating policy:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// DELETE /admin/finance/policies/:id (Delete policy)
+router.delete('/finance/policies/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (typeof id !== 'string' || !id) {
+      return res.status(400).json({ message: 'Invalid or missing policy ID' });
+    }
+
+    await deleteCancellationPolicy(id);
+    res.json({ message: 'Cancellation policy deleted successfully' });
+  } catch (error: any) {
+    console.error('Error deleting policy:', error);
+    res.status(400).json({ message: error.message || 'Failed to delete policy' });
+  }
+});
+
+
+// GET /admin/finance/policies
+router.get('/finance/policies', async (req: Request, res: Response) => {
+  try {
+    const policies = await getCancellationPolicies();
+    res.json({ data: policies });
+  } catch (error: any) {
+    console.error('Error fetching policies:', error);
+    res.status(500).json({ message: 'Failed to fetch cancellation policies', error: error.message });
+  }
+});
+
+
+
+// src/routes/admin.ts
+
+/**
+ * GET /admin/finance/refunds/pending
+ * Fetch all user refund requests with status 'REQUESTED'
+ */// GET /admin/finance/refunds/pending
+router.get('/finance/refunds/pending', async (req: Request, res: Response) => {
+  try {
+    const pendingRefunds = await prisma.refund.findMany({
+      where: {
+        status: 'REQUESTED',
+      },
+      include: {
+        payment: {
+          include: {
+            user: {
+              select: { id: true, name: true, email: true },
+            },
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    res.json({ data: pendingRefunds });
+  } catch (error: any) {
+    console.error('Error fetching pending refunds:', error);
+    res.status(500).json({ message: 'Failed to fetch pending refunds', error: error.message });
   }
 });
 

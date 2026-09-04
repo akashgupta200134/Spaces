@@ -224,8 +224,8 @@ model SpaceFacility {
 
 model MembershipPlan {
   id           String       @id @default(cuid())
-  spaceId      String
-  space        Space        @relation(fields: [spaceId], references: [id])
+  spaceId      String?
+  space        Space?       @relation(fields: [spaceId], references: [id])
   name         String
   description  String?
   price        Decimal
@@ -236,6 +236,7 @@ model MembershipPlan {
   isActive     Boolean      @default(true)
   memberships  Membership[]
 }
+
 
 model Membership {
   id            String                   @id @default(cuid())

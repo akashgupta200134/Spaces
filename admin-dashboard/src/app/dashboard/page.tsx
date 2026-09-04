@@ -13,6 +13,10 @@ import {
   MapPin,
   UserCog,
   CheckCircle2,
+  CreditCard,
+  Layers,
+  Sparkles,
+  Ticket,
 } from 'lucide-react';
 
 interface StatsData {
@@ -24,6 +28,11 @@ interface StatsData {
   verifiedUsers?: number;
   adminCount?: number;
   pendingVerifications?: number;
+  // Membership Plan Metrics
+  totalMembershipPlans?: number;
+  activeMembershipPlans?: number;
+  activeSubscriptions?: number;
+  totalSubscriptions?: number;
 }
 
 export default function DashboardOverview() {
@@ -31,7 +40,6 @@ export default function DashboardOverview() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Manual retry handler triggered by user action
   const handleRetry = async () => {
     setLoading(true);
     setError(null);
@@ -50,7 +58,6 @@ export default function DashboardOverview() {
   useEffect(() => {
     let isMounted = true;
 
-    // Fetch data asynchronously without synchronous state updates prior to resolution
     const fetchStats = async () => {
       try {
         const response = await API.get('/admin/stats');
@@ -135,6 +142,37 @@ export default function DashboardOverview() {
     },
   ];
 
+  const membershipCards = [
+    {
+      label: 'Total Plans Created',
+      value: stats?.totalMembershipPlans ?? 0,
+      icon: Layers,
+      color: 'text-violet-400',
+      bgColor: 'bg-violet-500/10',
+    },
+    {
+      label: 'Active Plans',
+      value: stats?.activeMembershipPlans ?? 0,
+      icon: Sparkles,
+      color: 'text-emerald-400',
+      bgColor: 'bg-emerald-500/10',
+    },
+    {
+      label: 'Active Subscriptions',
+      value: stats?.activeSubscriptions ?? 0,
+      icon: CreditCard,
+      color: 'text-cyan-400',
+      bgColor: 'bg-cyan-500/10',
+    },
+    {
+      label: 'Total Subscriptions',
+      value: stats?.totalSubscriptions ?? 0,
+      icon: Ticket,
+      color: 'text-fuchsia-400',
+      bgColor: 'bg-fuchsia-500/10',
+    },
+  ];
+
   const userCards = [
     {
       label: 'Total Registered Users',
@@ -171,10 +209,11 @@ export default function DashboardOverview() {
       <div>
         <h1 className="text-3xl font-bold text-white">Dashboard Overview</h1>
         <p className="text-slate-400 text-sm mt-1">
-          Live workspace metrics and account statistics synchronized directly with your database.
+          Live workspace metrics, membership tier statistics, and account activity synchronized directly with your database.
         </p>
       </div>
 
+      {/* Workspace Operations */}
       <div className="space-y-4">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
           Workspace Operations
@@ -200,6 +239,33 @@ export default function DashboardOverview() {
         </div>
       </div>
 
+      {/* Membership Plans & Subscriptions */}
+      <div className="space-y-4">
+        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+          Membership Plans & Tier Performance
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {membershipCards.map((card) => {
+            const Icon = card.icon;
+            return (
+              <div
+                key={card.label}
+                className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg hover:border-slate-700 transition"
+              >
+                <div className="flex items-center justify-between">
+                  <p className="text-slate-400 text-sm font-medium">{card.label}</p>
+                  <div className={`p-2.5 rounded-lg ${card.bgColor}`}>
+                    <Icon className={`h-5 w-5 ${card.color}`} />
+                  </div>
+                </div>
+                <p className="text-3xl font-bold text-white mt-4">{card.value}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Accounts & Role Distribution */}
       <div className="space-y-4">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
           Accounts & Role Distribution

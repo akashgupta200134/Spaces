@@ -1,3 +1,4 @@
+// lib/prisma.ts
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
@@ -7,4 +8,6 @@ const adapter = new PrismaPg({
 
 export const prisma = new PrismaClient({ adapter });
 
+export * from '@prisma/client';
 export default prisma;
+
