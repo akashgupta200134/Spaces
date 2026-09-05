@@ -4,6 +4,12 @@ import { prisma } from '../lib/prisma';
 import { calculateRefundAmount, createCancellationPolicy, deleteCancellationPolicy, getCancellationPolicies } from '../services/adminPolicy.service';
 import { processAdminRefund } from '../services/adminFinance.service';
 import { getFinancialOverview, getTransactionLedger } from '../services/adminLedger.service';
+import { createOffer, CreateOfferInput, deleteOffer, getAllOffers, validateAndApplyOffer } from '../services/adminOffer.service';
+import { bumpConsentVersion, getActiveConsentVersion, getPendingDeletions, processUserDeletion } from '../services/privacy.service';
+import { getModerationQueue, getRatingAnomalyAlerts, toggleReviewVisibility } from '../services/moderation.service';
+import { addTicketMessage, getTicketDetails, getTickets, reassignTicket, updateTicketMetadata } from '../services/ticket.service';
+import { AuditFilterOptions, getActorTraceability, getAuditLogs } from '../services/audit.service';
+import { createBroadcastNotification, getBroadcastHistory } from '../services/notification.service';
 const router = Router();
 
 
@@ -1292,11 +1298,7 @@ router.get('/finance/policies', async (req: Request, res: Response) => {
 });
 
 
-
-// src/routes/admin.ts
-
 /**
- * GET /admin/finance/refunds/pending
  * Fetch all user refund requests with status 'REQUESTED'
  */// GET /admin/finance/refunds/pending
 router.get('/finance/refunds/pending', async (req: Request, res: Response) => {
@@ -1323,6 +1325,325 @@ router.get('/finance/refunds/pending', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error fetching pending refunds:', error);
     res.status(500).json({ message: 'Failed to fetch pending refunds', error: error.message });
+  }
+});
+
+
+// GET /admin/offers - Fetch all promo codes
+router.get('/offers', async (req: Request, res: Response) => {
+  try {
+    const offers = await getAllOffers();
+    res.json({ data: offers });
+  } catch (error: any) {
+    res.status(500).json({ message: 'Failed to fetch offers', error: error.message });
+  }
+});
+
+// GET /admin/offers - Fetch all offers with linked plans
+router.get('/offers', async (req: Request, res: Response) => {
+  try {
+    const offers = await getAllOffers();
+    res.json({ data: offers });
+  } catch (error: any) {
+    res.status(500).json({ message: 'Failed to fetch offers', error: error.message });
+  }
+});
+
+// POST /admin/offers - Create new offer (Common or Plan-specific)
+router.post('/offers', async (req: Request, res: Response) => {
+  try {
+    const { code, type, value, validFrom, validTo, usageLimit, planId } = req.body;
+
+    if (!code || !type || value === undefined || !validFrom || !validTo) {
+      return res.status(400).json({ message: 'Missing required fields.' });
+    }
+
+    const payload: CreateOfferInput = {
+      code,
+      type,
+      value: Number(value),
+      validFrom: new Date(validFrom),
+      validTo: new Date(validTo),
+      ...(usageLimit !== undefined && usageLimit !== null && usageLimit !== ''
+        ? { usageLimit: Number(usageLimit) }
+        : {}),
+      ...(planId ? { planId: String(planId) } : {}),
+    };
+
+    const offer = await createOffer(payload);
+
+    res.status(201).json({ message: 'Promo code created successfully', data: offer });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// DELETE /admin/offers/:id
+router.delete('/offers/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (typeof id !== 'string' || !id) {
+      return res.status(400).json({ message: 'Valid offer ID is required.' });
+    }
+
+    await deleteOffer(id);
+    res.json({ message: 'Promo code deleted successfully' });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// POST /admin/offers/validate - Validate offer at checkout
+router.post('/offers/validate', async (req: Request, res: Response) => {
+  try {
+    const { code, amount, planId } = req.body;
+    if (!code || amount === undefined) {
+      return res.status(400).json({ message: 'Code and amount are required.' });
+    }
+
+    const result = await validateAndApplyOffer(code, Number(amount), planId);
+    res.json({ data: result });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// ==========================================
+// Privacy & GDPR Routes
+// ==========================================
+router.get('/privacy/deletions', async (req: Request, res: Response) => {
+  try {
+    const list = await getPendingDeletions();
+    res.json({ data: list });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post('/privacy/deletions/:id/process', async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!id) return res.status(400).json({ message: 'Valid user ID is required.' });
+
+    const updatedUser = await processUserDeletion(id);
+    res.json({ message: 'Account processed and anonymized.', data: updatedUser });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+router.get('/privacy/terms', async (req: Request, res: Response) => {
+  try {
+    const active = await getActiveConsentVersion();
+    res.json({ data: active });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post('/privacy/terms', async (req: Request, res: Response) => {
+  try {
+    const { version, title, content } = req.body;
+    if (!version || !title) {
+      return res.status(400).json({ message: 'Version and title are required.' });
+    }
+
+    const newVersion = await bumpConsentVersion(version, title, content);
+    res.status(201).json({ message: 'New terms version activated.', data: newVersion });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+
+
+
+// GET /api/admin/moderation/reviews
+router.get('/moderation/reviews', async (req: Request, res: Response) => {
+  try {
+    const filter = (req.query.filter as 'all' | 'hidden' | 'low_rating') || 'all';
+    const reviews = await getModerationQueue(filter);
+    return res.json({ data: reviews });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to fetch moderation queue', error: error.message });
+  }
+});
+
+// PATCH /api/admin/moderation/reviews/:id/visibility
+router.patch('/moderation/reviews/:id/visibility', async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { isHidden } = req.body;
+
+    if (typeof isHidden !== 'boolean') {
+      return res.status(400).json({ message: 'isHidden boolean parameter is required' });
+    }
+
+    const updated = await toggleReviewVisibility(id, isHidden);
+    return res.json({
+      message: `Review ${isHidden ? 'hidden' : 'restored'} successfully`,
+      data: updated,
+    });
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+// GET /api/admin/moderation/alerts
+router.get('/moderation/alerts', async (req: Request, res: Response) => {
+  try {
+    const alerts = await getRatingAnomalyAlerts();
+    return res.json({ data: alerts });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to generate rating anomaly alerts', error: error.message });
+  }
+});
+
+
+
+router.get('/tickets', async (req: Request, res: Response) => {
+  try {
+    const { priority, status, assignedTo } = req.query;
+    const tickets = await getTickets({
+      priority: priority as any,
+      status: status as any,
+      assignedTo: assignedTo as string,
+    });
+    return res.json({ data: tickets });
+  } catch (error: any) {
+    console.error('Error fetching tickets:', error); // Prints exact Prisma failure
+    return res.status(500).json({ message: 'Failed to fetch tickets', error: error.message });
+  }
+});
+
+
+// GET /api/admin/tickets/:id
+router.get('/tickets/:id', async (req: Request, res: Response) => {
+  try {
+    const ticket = await getTicketDetails(req.params.id as string);
+    if (!ticket) return res.status(404).json({ message: 'Ticket not found' });
+    return res.json({ data: ticket });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to fetch ticket details', error: error.message });
+  }
+});
+
+// PATCH /api/admin/tickets/:id/reassign
+router.patch('/tickets/:id/reassign', async (req: Request, res: Response) => {
+  try {
+    const { assignedTo } = req.body;
+    const updated = await reassignTicket(req.params.id as string, assignedTo || null);
+    return res.json({ message: 'Ticket reassigned successfully', data: updated });
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+// PATCH /api/admin/tickets/:id/status
+router.patch('/tickets/:id/status', async (req: Request, res: Response) => {
+  try {
+    const { status, priority } = req.body;
+    const updated = await updateTicketMetadata(req.params.id as string, { status, priority });
+    return res.json({ message: 'Ticket updated', data: updated });
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+// POST /api/admin/tickets/:id/messages
+router.post('/tickets/:id/messages', async (req: Request, res: Response) => {
+  try {
+    const { senderId, message, isInternal } = req.body;
+    if (!message || !senderId) {
+      return res.status(400).json({ message: 'senderId and message are required' });
+    }
+
+    const newMessage = await addTicketMessage(
+      req.params.id as string,
+      senderId,
+      message,
+      Boolean(isInternal)
+    );
+    return res.status(201).json({ data: newMessage });
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+
+
+router.get('/audit-logs', async (req: Request, res: Response) => {
+  try {
+    const filters: AuditFilterOptions = {
+      page: req.query.page ? Number(req.query.page) : 1,
+      limit: req.query.limit ? Number(req.query.limit) : 20,
+    };
+
+    if (typeof req.query.search === 'string') filters.search = req.query.search;
+    if (typeof req.query.action === 'string') filters.action = req.query.action;
+    if (typeof req.query.entityType === 'string') filters.entityType = req.query.entityType;
+    if (typeof req.query.actorId === 'string') filters.actorId = req.query.actorId;
+
+    const data = await getAuditLogs(filters);
+    return res.json(data);
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to fetch audit logs', error: error.message });
+  }
+});
+
+
+router.get('/audit-logs/actor/:actorId', async (req: Request, res: Response) => {
+  try {
+    const actorId = typeof req.params.actorId === 'string' ? req.params.actorId : undefined;
+    
+    if (!actorId) {
+      return res.status(400).json({ message: 'Valid actorId parameter is required' });
+    }
+
+    const logs = await getActorTraceability(actorId);
+    return res.json({ logs });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to fetch actor trace', error: error.message });
+  }
+});
+
+
+
+
+
+
+router.post('/broadcasts', async (req: Request, res: Response) => {
+  try {
+    const { title, message, type, targetRole, spaceId } = req.body;
+
+    if (!title || !message || !type) {
+      return res.status(400).json({ message: 'Title, message, and type are required fields.' });
+    }
+
+    const result = await createBroadcastNotification({
+      title,
+      message,
+      type,
+      targetRole,
+      spaceId: type === 'LOCATION_NOTICE' ? spaceId : undefined,
+    });
+
+    return res.status(201).json({
+      message: 'Broadcast notification dispatched successfully.',
+      data: result,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to dispatch broadcast', error: error.message });
+  }
+});
+
+router.get('/broadcasts', async (req: Request, res: Response) => {
+  try {
+    const broadcasts = await getBroadcastHistory();
+    return res.json({ broadcasts });
+  } catch (error: any) {
+    return res.status(500).json({ message: 'Failed to fetch broadcast history', error: error.message });
   }
 });
 

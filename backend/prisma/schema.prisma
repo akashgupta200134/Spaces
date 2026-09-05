@@ -77,8 +77,11 @@ enum OtpPurpose {
 }
 
 enum DeletionStatus {
+  NONE
   PENDING
+  IN_PROGRESS
   COMPLETED
+  CANCELLED
 }
 
 model User {
@@ -108,11 +111,27 @@ model User {
   notifications       Notification[]
   studySessions       StudySession[]
   waitlistEntries     Waitlist[]
-  supportTickets      SupportTicket[]
+  createdTickets      SupportTicket[]  @relation("UserTickets")
+  assignedTickets     SupportTicket[]  @relation("AdminTickets")
+  sentMessages        SupportMessage[]
   spaceManager        SpaceManager?
-  checkIns            CheckIn[]       @relation("MemberCheckIns")
-  scannedLogs         CheckIn[]       @relation("ManagerCheckIns")
+  checkIns            CheckIn[]        @relation("MemberCheckIns")
+  scannedLogs         CheckIn[]        @relation("ManagerCheckIns")
+  auditLogs           AuditLog[]
+  
 }
+
+
+model TermsConsentVersion {
+  id        String   @id @default(cuid())
+  version   String   @unique
+  title     String
+  content   String?
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+
 
 model OtpVerification {
   id         String     @id @default(cuid())
@@ -235,6 +254,7 @@ model MembershipPlan {
   accessHours  Json?
   isActive     Boolean      @default(true)
   memberships  Membership[]
+  offers       Offer[]      // Added relation to Offer
 }
 
 
@@ -384,26 +404,32 @@ model Favorite {
 }
 
 model Notification {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  type      String
-  title     String
-  body      String
-  isRead    Boolean  @default(false)
-  metadata  Json?
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  userId     String?  
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title      String
+  message    String   @db.Text
+  type       String   @default("ANNOUNCEMENT") // "ANNOUNCEMENT", "MAINTENANCE", "LOCATION_NOTICE", "ALERT"
+  targetRole String?  @default("ALL") // "ALL", "USER", "SPACE_MANAGER"
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  @@index([userId])
+  @@index([targetRole])
 }
 
 model Offer {
-  id         String   @id @default(cuid())
-  code       String   @unique
+  id         String          @id @default(cuid())
+  code       String          @unique
   type       String
   value      Decimal
   validFrom  DateTime
   validTo    DateTime
   usageLimit Int?
-  usedCount  Int      @default(0)
+  usedCount  Int             @default(0)
+  planId     String?         // Null = Common offer (applies to all plans)
+  plan       MembershipPlan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  @@index([planId])
 }
 
 model Waitlist {
@@ -423,29 +449,30 @@ model Waitlist {
 }
 
 model SupportTicket {
-  id          String           @id @default(cuid())
-  userId      String
-  user        User             @relation(fields: [userId], references: [id])
-  subject     String
-  category    String
-  description String
-  status      TicketStatus     @default(OPEN)
-  priority    String           @default("NORMAL")
-  assignedTo  String?
-  messages    SupportMessage[]
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id            String           @id @default(cuid())
+  subject       String
+  status        String           @default("OPEN")
+  priority      String           @default("NORMAL")
+  userId        String
+  user          User             @relation("UserTickets", fields: [userId], references: [id])
+  assignedTo    String?
+  assignedAdmin User?            @relation("AdminTickets", fields: [assignedTo], references: [id])
+  messages      SupportMessage[]
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
 }
 
 model SupportMessage {
-  id          String        @id @default(cuid())
-  ticketId    String
-  ticket      SupportTicket @relation(fields: [ticketId], references: [id])
-  senderId    String
-  message     String
-  attachments String[]
-  createdAt   DateTime      @default(now())
+  id         String        @id @default(cuid())
+  ticketId   String
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  senderId   String
+  sender     User          @relation(fields: [senderId], references: [id])
+  message    String        @db.Text
+  isInternal Boolean       @default(false)
+  createdAt  DateTime      @default(now())
 }
+
 
 model StudySession {
   id              String    @id @default(cuid())
@@ -460,12 +487,19 @@ model StudySession {
 
 model AuditLog {
   id         String   @id @default(cuid())
-  actorId    String?
-  action     String
-  entityType String
-  entityId   String
-  metadata   Json?
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  actorRole  String
+  action     String   // e.g., "BOOKING_OVERRIDE", "SEAT_BLOCK", "MANAGER_ASSIGN"
+  entityType String   // e.g., "Booking", "Space", "User"
+  entityId   String?
+  details    Json?
+  ipAddress  String?
   createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([entityType])
 }
 
 
