@@ -271,12 +271,21 @@ export default function SpaceDiscoveryScreen() {
                   {/* Facility Tags on Card */}
                   {item.facilities && item.facilities.length > 0 && (
                     <View style={styles.facilityRow}>
-                      {item.facilities.slice(0, 3).map((f: any, idx: number) => (
-                        <View key={f.id || idx} style={styles.miniChip}>
-                          <Text style={styles.miniChipText}>{f.name || f}</Text>
-                        </View>
-                      ))}
-                      {item.facilities.length > 3 && (
+                     {item.facilities.slice(0, 3).map((f: any, idx: number) => {
+  const facilityName =
+    typeof f === 'string'
+      ? f
+      : f?.name || f?.facility?.name || (typeof f?.facility === 'string' ? f.facility : '');
+
+  if (!facilityName) return null;
+
+  return (
+    <View key={f.id || f.facility?.id || idx} style={styles.miniChip}>
+      <Text style={styles.miniChipText}>{facilityName}</Text>
+    </View>
+  );
+})}
+ {item.facilities.length > 3 && (
                         <Text style={styles.moreChipText}>+{item.facilities.length - 3} more</Text>
                       )}
                     </View>
