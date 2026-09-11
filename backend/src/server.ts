@@ -7,21 +7,23 @@ import rateLimit from 'express-rate-limit';
 
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
+import userSpaceRoutes from './routes/userSpace.routes';
+import userRoutes from './routes/user.routes';
 
 const app = express();
 
 app.use(helmet());
-app.use(cors());
-app.use(morgan('dev'));
-app.use(express.json()); 
 
+// 2. Updated CORS to accept local mobile & Expo connections
 app.use(
   cors({
-    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: true, // Allows requests from mobile app IP & local frontend
     credentials: true,
   })
 );
-app.use(express.json());
+
+app.use(morgan('dev'));
+app.use(express.json()); 
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -29,14 +31,19 @@ const authLimiter = rateLimit({
   message: { message: 'Too many auth requests from this IP.' },
 });
 
+// Mounted Routes
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/user/spaces', userSpaceRoutes);
+app.use('/api/user', userRoutes);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'OK', timestamp: new Date() });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+const PORT = Number(process.env.PORT) || 5000;
+
+// 3. Bind to 0.0.0.0 so physical devices on your Wi-Fi can connect
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running at http://10.46.100.131:${PORT}`);
 });

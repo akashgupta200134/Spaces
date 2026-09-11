@@ -100,7 +100,18 @@ router.post('/verify-email', async (req: Request, res: Response): Promise<void> 
     const payload: JwtPayload = { userId: user.id, email: user.email, role: user.role };
     const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: '7d' });
 
-    res.json({ token, role: user.role, email: user.email, userId: user.id });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        phone: user.phone,
+        profileImage: user.profileImage,
+        createdAt: user.createdAt,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -143,7 +154,10 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
         email: user.email,
         name: user.name,
         role: user.role,
+        phone: user.phone,
+        profileImage: user.profileImage,
         isEmailVerified: user.isEmailVerified,
+        createdAt: user.createdAt,
       },
     });
   } catch (err: any) {
@@ -216,6 +230,41 @@ router.post('/reset-password', async (req: Request, res: Response): Promise<void
     await prisma.otpVerification.delete({ where: { id: record.id } });
 
     res.json({ message: 'Password updated successfully.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- 6. Resend Signup Verification OTP ---
+router.post('/resend-verification', async (req: Request, res: Response): Promise<void> => {
+  const { email } = req.body;
+  if (!email) {
+    res.status(400).json({ message: 'Email is required' });
+    return;
+  }
+
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || user.isEmailVerified) {
+      res.json({ message: 'If an unverified account exists, a new code was sent.' });
+      return;
+    }
+
+    const rawOtp = crypto.randomInt(100000, 999999).toString();
+    const otpHash = await bcrypt.hash(rawOtp, 10);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await prisma.otpVerification.deleteMany({ where: { email, purpose: OtpPurpose.SIGNUP } });
+    await prisma.otpVerification.create({
+      data: { email, otpHash, purpose: OtpPurpose.SIGNUP, expiresAt },
+    });
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`🔑 [DEV VERIFY OTP] Resend for ${email}: ${rawOtp}`);
+    }
+    await sendOtpEmail(email, rawOtp);
+
+    res.json({ message: 'If an unverified account exists, a new code was sent.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
